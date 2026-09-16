@@ -3,8 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>My Macintosh Terminal</title>
+  <title>~you — Macintosh Terminal</title>
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  
+  <!-- xterm.js from CDN -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  
+  <!-- Marked.js for Markdown -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  
   <style>
     /* Chicago Font */
     @font-face {
@@ -28,7 +38,7 @@
     html, body {
       height: 100%;
       background: var(--mac-window-bg);
-      font-family: 'Chicago', 'Geneva', 'Monaco', 'Courier New', monospace;
+      font-family: 'Chicago', 'Geneva', 'Monaco', monospace;
     }
 
     #app {
@@ -36,24 +46,32 @@
       display: flex;
       justify-content: center;
       align-items: center;
-      padding: 20px;
+      padding: 12px;
     }
 
     #mac-window {
       width: 100%;
-      max-width: 900px;
-      height: 85vh;
+      max-width: 850px;
+      height: 90vh;
       background: var(--mac-bg);
       border: 2px solid var(--mac-border);
-      box-shadow: 4px 4px 0px var(--mac-fg);
+      box-shadow: 6px 6px 0px var(--mac-fg);
       display: flex;
       flex-direction: column;
       overflow: hidden;
     }
 
+    /* Title Bar */
     #titlebar {
       height: 22px;
-      background: var(--mac-titlebar);
+      min-height: 22px;
+      background: repeating-linear-gradient(
+        to bottom,
+        var(--mac-titlebar) 0px,
+        var(--mac-titlebar) 2px,
+        var(--mac-bg) 2px,
+        var(--mac-bg) 4px
+      );
       border-bottom: 2px solid var(--mac-border);
       display: flex;
       align-items: center;
@@ -72,6 +90,7 @@
       height: 13px;
       border: 1px solid var(--mac-border);
       background: var(--mac-bg);
+      cursor: pointer;
     }
 
     .window-controls .close { background: var(--mac-fg); }
@@ -84,96 +103,56 @@
       font-size: 11px;
       font-weight: bold;
       letter-spacing: 0.5px;
+      color: var(--mac-fg);
     }
 
+    /* Terminal Host */
     #term-host {
       flex: 1;
-      padding: 16px;
-      overflow-y: auto;
-      background: var(--mac-bg);
-      color: var(--mac-fg);
-      font-family: 'Chicago', 'Geneva', 'Monaco', monospace;
-      font-size: 14px;
-      line-height: 1.4;
-      cursor: text;
+      padding: 16px 18px 28px 18px;
+      overflow: hidden;
+      position: relative;
     }
 
-    #term-host:focus {
-      outline: none;
+    #term-screen {
+      height: 100%;
     }
 
-    .line {
-      white-space: pre-wrap;
-      word-wrap: break-word;
+    #term-screen .xterm {
+      height: 100%;
     }
 
-    .prompt-line {
-      display: flex;
-      align-items: center;
+    /* xterm theme override - Macintosh Black & White */
+    .xterm .xterm-rows {
+      font-family: 'Chicago', 'Geneva', 'Monaco', 'Courier New', monospace !important;
     }
 
-    .prompt {
-      color: var(--mac-fg);
-      white-space: pre;
-    }
-
-    #input {
-      flex: 1;
-      background: transparent;
-      border: none;
-      outline: none;
-      font-family: inherit;
-      font-size: inherit;
-      color: inherit;
-      caret-color: var(--mac-fg);
-    }
-
-    .cursor {
-      display: inline-block;
-      width: 8px;
-      height: 16px;
-      background: var(--mac-fg);
-      animation: blink 1s step-end infinite;
-      vertical-align: text-bottom;
-    }
-
-    @keyframes blink {
-      50% { opacity: 0; }
-    }
-
-    .hidden {
+    /* Scanlines Effect */
+    #term-host::before {
+      content: "";
       position: absolute;
-      left: -9999px;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(0,0,0,0.03) 0 1px,
+        transparent 1px 3px
+      );
     }
 
-    /* Output styling */
-    .heading1 {
-      font-weight: bold;
-      text-decoration: underline;
-      font-size: 16px;
-    }
-
-    .heading2 {
-      font-weight: bold;
-      font-size: 15px;
-    }
-
-    .bold {
-      font-weight: bold;
-    }
-
-    .italic {
-      font-style: italic;
-    }
-
-    .code {
-      background: #f0f0f0;
-      padding: 1px 4px;
-      border: 1px solid #ccc;
-    }
-
-    .separator {
-      color: var(--mac-gray);
+    /* Vignette Effect */
+    #term-host::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 11;
+      background: radial-gradient(
+        ellipse 120% 120% at 50% 50%,
+        transparent 55%,
+        rgba(0,0,0,0.15) 100%
+      );
     }
 
     /* Selection */
@@ -183,23 +162,33 @@
     }
 
     /* Scrollbar */
-    #term-host::-webkit-scrollbar {
+    .xterm-viewport {
+      scrollbar-width: thin;
+      scrollbar-color: var(--mac-fg) transparent;
+    }
+
+    .xterm-viewport::-webkit-scrollbar {
       width: 14px;
     }
 
-    #term-host::-webkit-scrollbar-track {
+    .xterm-viewport::-webkit-scrollbar-track {
       background: var(--mac-bg);
       border-left: 1px solid var(--mac-border);
     }
 
-    #term-host::-webkit-scrollbar-thumb {
+    .xterm-viewport::-webkit-scrollbar-thumb {
       background: var(--mac-light-gray);
       border: 1px solid var(--mac-border);
     }
 
-    @media (max-width: 768px) {
-      #app { padding: 10px; }
-      #mac-window { height: 90vh; box-shadow: 2px 2px 0px var(--mac-fg); }
+    /* Responsive */
+    @media (max-width: 640px) {
+      #app { padding: 4px; }
+      #mac-window {
+        height: 95vh;
+        box-shadow: 3px 3px 0px var(--mac-fg);
+      }
+      #term-host { padding: 12px 8px 22px 8px; }
     }
   </style>
 </head>
@@ -214,12 +203,8 @@
         </div>
         <div class="title">Terminal — you@mac</div>
       </div>
-      <div id="term-host" tabindex="0">
-        <div id="output"></div>
-        <div class="prompt-line">
-          <span class="prompt" id="prompt-text"></span>
-          <input type="text" id="input" autofocus spellcheck="false" autocomplete="off" autocapitalize="off">
-        </div>
+      <div id="term-host">
+        <div id="term-screen"></div>
       </div>
     </div>
   </div>

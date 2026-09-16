@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Macintosh Terminal</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <style>
+    /* Chicago Font */
+    @font-face {
+      font-family: 'Chicago';
+      src: url('fonts/ChicagoFLF.woff2') format('woff2');
+      font-display: swap;
+    }
+
+    :root {
+      --mac-bg: #ffffff;
+      --mac-fg: #000000;
+      --mac-gray: #888888;
+      --mac-light-gray: #dddddd;
+      --mac-border: #000000;
+      --mac-titlebar: #dddddd;
+      --mac-window-bg: #eeeeee;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--mac-window-bg);
+      font-family: 'Chicago', 'Geneva', 'Monaco', 'Courier New', monospace;
+    }
+
+    #app {
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    #mac-window {
+      width: 100%;
+      max-width: 900px;
+      height: 85vh;
+      background: var(--mac-bg);
+      border: 2px solid var(--mac-border);
+      box-shadow: 4px 4px 0px var(--mac-fg);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #titlebar {
+      height: 22px;
+      background: var(--mac-titlebar);
+      border-bottom: 2px solid var(--mac-border);
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      gap: 8px;
+      user-select: none;
+    }
+
+    .window-controls {
+      display: flex;
+      gap: 6px;
+    }
+
+    .window-controls span {
+      width: 13px;
+      height: 13px;
+      border: 1px solid var(--mac-border);
+      background: var(--mac-bg);
+    }
+
+    .window-controls .close { background: var(--mac-fg); }
+    .window-controls .minimize { background: var(--mac-gray); }
+    .window-controls .maximize { background: var(--mac-light-gray); }
+
+    .title {
+      flex: 1;
+      text-align: center;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+    }
+
+    #term-host {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      background: var(--mac-bg);
+      color: var(--mac-fg);
+      font-family: 'Chicago', 'Geneva', 'Monaco', monospace;
+      font-size: 14px;
+      line-height: 1.4;
+      cursor: text;
+    }
+
+    #term-host:focus {
+      outline: none;
+    }
+
+    .line {
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .prompt-line {
+      display: flex;
+      align-items: center;
+    }
+
+    .prompt {
+      color: var(--mac-fg);
+      white-space: pre;
+    }
+
+    #input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      font-family: inherit;
+      font-size: inherit;
+      color: inherit;
+      caret-color: var(--mac-fg);
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: var(--mac-fg);
+      animation: blink 1s step-end infinite;
+      vertical-align: text-bottom;
+    }
+
+    @keyframes blink {
+      50% { opacity: 0; }
+    }
+
+    .hidden {
+      position: absolute;
+      left: -9999px;
+    }
+
+    /* Output styling */
+    .heading1 {
+      font-weight: bold;
+      text-decoration: underline;
+      font-size: 16px;
+    }
+
+    .heading2 {
+      font-weight: bold;
+      font-size: 15px;
+    }
+
+    .bold {
+      font-weight: bold;
+    }
+
+    .italic {
+      font-style: italic;
+    }
+
+    .code {
+      background: #f0f0f0;
+      padding: 1px 4px;
+      border: 1px solid #ccc;
+    }
+
+    .separator {
+      color: var(--mac-gray);
+    }
+
+    /* Selection */
+    ::selection {
+      background: var(--mac-fg);
+      color: var(--mac-bg);
+    }
+
+    /* Scrollbar */
+    #term-host::-webkit-scrollbar {
+      width: 14px;
+    }
+
+    #term-host::-webkit-scrollbar-track {
+      background: var(--mac-bg);
+      border-left: 1px solid var(--mac-border);
+    }
+
+    #term-host::-webkit-scrollbar-thumb {
+      background: var(--mac-light-gray);
+      border: 1px solid var(--mac-border);
+    }
+
+    @media (max-width: 768px) {
+      #app { padding: 10px; }
+      #mac-window { height: 90vh; box-shadow: 2px 2px 0px var(--mac-fg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="mac-window">
+      <div id="titlebar">
+        <div class="window-controls">
+          <span class="close"></span>
+          <span class="minimize"></span>
+          <span class="maximize"></span>
+        </div>
+        <div class="title">Terminal — you@mac</div>
+      </div>
+      <div id="term-host" tabindex="0">
+        <div id="output"></div>
+        <div class="prompt-line">
+          <span class="prompt" id="prompt-text"></span>
+          <input type="text" id="input" autofocus spellcheck="false" autocomplete="off" autocapitalize="off">
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

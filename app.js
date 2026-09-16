@@ -1,843 +1,1104 @@
-// app.js - Macintosh Terminal with xterm.js
-// Full interactive shell experience like jyy.github.io
-
-(function() {
+// ==========================================================================
+// app.js — Macintosh-style terminal homepage.
+// A faithful port of jiangyy.github.io's architecture, in dependency-free JS
+// (xterm.js + marked loaded from CDN). Four concerns, decoupled:
+//
+//   content.js ——> DOCS (markdown) ——> doc commands + virtual FS
+//   term       : xterm.js wrapper (shell mode + tui mode for the pager)
+//   render     : markdown tokens -> ANSI (clickable OSC 8 links)
+//   shell      : REPL (line editor, history, tab-complete, pipes)
+//   apps       : oneshot + TUI commands (ls/cat/.../more/less)
+// ==========================================================================
+(function () {
   'use strict';
 
-  // ==================== Configuration ====================
-  const CONFIG = {
-    username: 'you',
-    hostname: 'macintosh',
-    home: '/Users/you',
-    shell: 'Macintosh'
+  const SITE = window.SITE;
+  const DOCS = window.DOCS;
+
+  // ========================================================================
+  // ANSI primitives (ported from term/ansi.ts)
+  // ========================================================================
+  const RESET = '\x1b[0m';
+  const BOLD = '\x1b[1m';
+  const DIM = '\x1b[2m';
+  const ITALIC = '\x1b[3m';
+  const UNDERLINE = '\x1b[4m';
+  const INVERSE = '\x1b[7m';
+  const fg256 = (n) => `\x1b[38;5;${n}m`;
+  const move = (x, y) => `\x1b[${y + 1};${x + 1}H`;
+  const ERASE_BELOW = '\x1b[0J';
+
+  // Monochrome Macintosh palette (grayscale 256-color).
+  const C = {
+    heading: fg256(234), // near-black
+    bullet: fg256(240),
+    border: fg256(240),
+    hr: fg256(250),
   };
 
-  // ==================== Virtual File System ====================
-  const fs = {
-    '/': { type: 'dir', children: ['Applications', 'System', 'Users', 'bin', 'help.txt', 'about.txt'] },
-    '/Applications': { type: 'dir', children: ['Terminal.app', 'TextEdit.app'] },
-    '/Applications/Terminal.app': { type: 'file', content: 'Terminal Application v1.0' },
-    '/Applications/TextEdit.app': { type: 'file', content: 'Text Editor' },
-    '/System': { type: 'dir', children: ['Library'] },
-    '/System/Library': { type: 'dir', children: ['Fonts', 'Extensions'] },
-    '/System/Library/Fonts': { type: 'dir', children: [] },
-    '/System/Library/Extensions': { type: 'dir', children: [] },
-    '/Users': { type: 'dir', children: ['you'] },
-    '/Users/you': { type: 'dir', children: ['Desktop', 'Documents', 'Downloads', 'Pictures', 'readme.txt'] },
-    '/Users/you/Desktop': { type: 'dir', children: ['welcome.txt'] },
-    '/Users/you/Desktop/welcome.txt': { type: 'file', content: 'Welcome to your Desktop!' },
-    '/Users/you/Documents': { type: 'dir', children: ['bio.md', 'projects.md', 'resume.md', 'wiki'] },
-    '/Users/you/Documents/wiki': { type: 'dir', children: ['notes.md', 'tips.md'] },
-    '/Users/you/Documents/wiki/notes.md': { type: 'file', content: '# Development Notes\n\n## Quick Tips\n\n- Use `git log --oneline` for compact history\n- `git diff --staged` before commit\n- Always write tests first' },
-    '/Users/you/Documents/wiki/tips.md': { type: 'file', content: '# Terminal Tips\n\n## Shortcuts\n\n- `Ctrl-R` - Search history\n- `Ctrl-A` - Move to start\n- `Ctrl-E` - Move to end\n- `Ctrl-W` - Delete word' },
-    '/Users/you/Documents/bio.md': { type: 'file', content: `# About Me
+  function link(url, text) {
+    return `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+  }
 
-Hello! I'm a software developer passionate about creating beautiful and functional applications.
+  function stripAnsi(s) {
+    return s.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\]8;;[^\x1b\\]*(?:\x1b\\|\x07)/g, '');
+  }
 
-## Background
+  function isExtender(code) {
+    return (
+      code === 0x200d || code === 0x200c ||
+      (code >= 0xfe00 && code <= 0xfe0f) ||
+      (code >= 0x1f3fb && code <= 0x1f3ff) ||
+      (code >= 0x0300 && code <= 0x036f) ||
+      (code >= 0x1ab0 && code <= 0x1aff) ||
+      (code >= 0x1dc0 && code <= 0x1dff) ||
+      (code >= 0x20d0 && code <= 0x20ff) ||
+      (code >= 0xfe20 && code <= 0xfe2f)
+    );
+  }
+  function isRegional(code) {
+    return code >= 0x1f1e6 && code <= 0x1f1ff;
+  }
+  function charWidth(code) {
+    if (isExtender(code)) return 0;
+    if (code < 0x300) return 1;
+    if (
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0x303e) ||
+      (code >= 0x3040 && code <= 0x33bf) ||
+      (code >= 0x3400 && code <= 0x4dbf) ||
+      (code >= 0x4e00 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xfe30 && code <= 0xfe6f) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x1f000 && code <= 0x1faff)
+    )
+      return 2;
+    return 1;
+  }
+  function displayWidth(str) {
+    const cps = [];
+    for (const ch of str) cps.push(ch.codePointAt(0) ?? 0);
+    let w = 0, joinNext = false;
+    for (let i = 0; i < cps.length; i++) {
+      const cp = cps[i];
+      if (cp === 0x200d) { joinNext = true; continue; }
+      if (isExtender(cp)) continue;
+      if (joinNext) { joinNext = false; continue; }
+      if (isRegional(cp) && i + 1 < cps.length && isRegional(cps[i + 1])) { w += 2; i++; continue; }
+      w += charWidth(cp);
+    }
+    return w;
+  }
+  function prevClusterStart(str, at) {
+    if (at <= 0) return 0;
+    const cps = [...str.slice(0, at)];
+    const cp = (i) => cps[i].codePointAt(0) ?? 0;
+    let k = cps.length;
+    while (k > 0 && isExtender(cp(k - 1))) k--;
+    if (k === 0) return at;
+    k--;
+    while (k >= 2 && cp(k - 1) === 0x200d) k -= 2;
+    if (k >= 2 && isRegional(cp(k - 1)) && isRegional(cp(k - 2))) k--;
+    return cps.slice(0, k).reduce((n, s) => n + s.length, 0);
+  }
+  function nextClusterEnd(str, at) {
+    const cps = [...str.slice(at)];
+    if (cps.length === 0) return at;
+    const cp = (i) => cps[i].codePointAt(0) ?? 0;
+    let k = 1;
+    const eat = () => { while (k < cps.length && isExtender(cp(k)) && cp(k) !== 0x200d) k++; };
+    eat();
+    while (k + 1 < cps.length && cp(k) === 0x200d) { k += 2; eat(); }
+    return at + cps.slice(0, k).reduce((n, s) => n + s.length, 0);
+  }
 
-- **Education**: Computer Science
-- **Location**: San Francisco, CA
-- **Interests**: OS Development, Graphics Programming, UI Design
+  // ========================================================================
+  // Styled-line wrapping (ported from term/wrap.ts)
+  // ========================================================================
+  function tokenize(line) {
+    const toks = [];
+    let i = 0;
+    while (i < line.length) {
+      const c = line.charCodeAt(i);
+      if (c === 0x1b) {
+        const next = line.charCodeAt(i + 1);
+        if (next === 0x5b) {
+          let j = i + 2;
+          while (j < line.length && /[0-9;]/.test(line[j])) j++;
+          toks.push({ kind: 'sgr', seq: line.slice(i, j + 1) });
+          i = j + 1;
+          continue;
+        }
+        if (next === 0x5d) {
+          let j = i + 2;
+          while (j < line.length && line.charCodeAt(j) !== 0x07 &&
+            !(line.charCodeAt(j) === 0x1b && line.charCodeAt(j + 1) === 0x5c)) j++;
+          if (line.charCodeAt(j) === 0x07) { toks.push({ kind: 'osc', seq: line.slice(i, j + 1) }); i = j + 1; }
+          else { toks.push({ kind: 'osc', seq: line.slice(i, j + 2) }); i = j + 2; }
+          continue;
+        }
+        toks.push({ kind: 'osc', seq: line.slice(i, i + 2) });
+        i += 2;
+        continue;
+      }
+      if (c >= 0xd800 && c <= 0xdbff) {
+        toks.push({ kind: 'ch', s: line.slice(i, i + 2), w: charWidth(line.codePointAt(i) ?? 0) });
+        i += 2;
+        continue;
+      }
+      toks.push({ kind: 'ch', s: line[i], w: charWidth(c) });
+      i += 1;
+    }
+    return toks;
+  }
 
-## Skills
+  const tokStr = (ts) => ts.map((t) => (t.kind === 'ch' ? t.s : t.seq)).join('');
 
-- JavaScript / TypeScript
-- Rust / C++
-- Python
-- Web Development
-- System Programming
+  function foldSgr(open, toks) {
+    let o = open;
+    for (const t of toks) {
+      if (t.kind !== 'sgr') continue;
+      o = t.seq === RESET || t.seq === '\x1b[m' ? '' : o + t.seq;
+    }
+    return o;
+  }
 
-## Contact
+  function wrapLine(line, cols) {
+    const toks = tokenize(line);
+    const out = [];
+    let cur = '', w = 0, open = '';
+    const breakLine = () => { out.push(cur + (open ? RESET : '')); cur = open; w = 0; };
+    for (const t of toks) {
+      if (t.kind !== 'ch') {
+        cur += t.seq;
+        if (t.kind === 'sgr') open = t.seq === RESET || t.seq === '\x1b[m' ? '' : open + t.seq;
+        continue;
+      }
+      if (w > 0 && w + t.w > cols) breakLine();
+      cur += t.s;
+      w += t.w;
+    }
+    out.push(cur + (open ? RESET : ''));
+    return out;
+  }
 
-- Email: hello@example.com
-- GitHub: github.com/yourusername` },
-    '/Users/you/Documents/projects.md': { type: 'file', content: `# My Projects
+  function wrapWords(line, width) {
+    if (width < 1) width = 1;
+    const out = [];
+    for (const seg of line.split('\n')) {
+      const wrapped = wrapSegment(seg, width);
+      if (wrapped.length) out.push(...wrapped);
+      else out.push('');
+    }
+    return out;
+  }
+  function wrapSegment(line, width) {
+    const toks = tokenize(line);
+    const words = [];
+    let cur = [], curW = 0;
+    const flushWord = () => { if (cur.length) { words.push({ toks: cur, w: curW }); cur = []; curW = 0; } };
+    for (const t of toks) {
+      if (t.kind === 'ch' && t.s === ' ') { flushWord(); continue; }
+      if (t.kind === 'ch') curW += t.w;
+      cur.push(t);
+    }
+    flushWord();
 
-## Project 1: Terminal Emulator
+    const out = [];
+    let lineStr = '', w = 0, open = '';
+    const flush = () => { out.push(lineStr + (open ? RESET : '')); lineStr = ''; w = 0; };
+    for (const word of words) {
+      if (word.w === 0) { open = foldSgr(open, word.toks); continue; }
+      if (w === 0) lineStr = open;
+      const needSpace = w > 0 ? 1 : 0;
+      if (w + needSpace + word.w > width && w > 0) { flush(); lineStr = open; }
+      if (w > 0) { lineStr += ' '; w += 1; }
+      if (word.w <= width) {
+        lineStr += tokStr(word.toks);
+        w += word.w;
+        open = foldSgr(open, word.toks);
+      } else {
+        for (const t of word.toks) {
+          if (t.kind !== 'ch') {
+            lineStr += t.seq;
+            if (t.kind === 'sgr') open = t.seq === RESET || t.seq === '\x1b[m' ? '' : open + t.seq;
+            continue;
+          }
+          if (w > 0 && w + t.w > width) { flush(); lineStr = open; }
+          lineStr += t.s;
+          w += t.w;
+        }
+      }
+    }
+    if (w > 0) flush();
+    return out;
+  }
 
-A retro-style terminal emulator for the web.
+  // ========================================================================
+  // Markdown -> ANSI renderer (ported from content/render.ts)
+  // ========================================================================
+  function renderMarkdown(body, width) {
+    let tokens;
+    try { tokens = marked.lexer(body); }
+    catch (e) { return body + '\n\n'; }
+    const out = tokens.map((t) => renderBlock(t, width)).join('');
+    return out.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n\n';
+  }
 
-**Features:**
-- Full command history
-- Tab completion
-- Virtual file system
+  function renderInline(tokens) {
+    if (!tokens) return '';
+    return tokens.map(renderInlineToken).join('');
+  }
+  function renderInlineToken(t) {
+    switch (t.type) {
+      case 'strong': return BOLD + renderInline(t.tokens) + RESET;
+      case 'em': return ITALIC + renderInline(t.tokens) + RESET;
+      case 'codespan': return `\x1b[58;5;250m\x1b[4m${t.text}${RESET}`;
+      case 'link': {
+        const isEmail = t.href.startsWith('mailto:') ||
+          (!/^[a-z][a-z0-9+.-]*:/i.test(t.href) && t.href.includes('@'));
+        if (isEmail) return renderInline(t.tokens) || t.href;
+        let href = t.href;
+        if (href.startsWith('#') && typeof location !== 'undefined') {
+          href = location.origin + location.pathname + href;
+        }
+        return link(href, renderInline(t.tokens) || t.href);
+      }
+      case 'image': return `${DIM}[img: ${t.text || t.href}]${RESET}`;
+      case 'br': return '\n';
+      case 'escape': return t.text;
+      case 'text':
+      default: return t.tokens ? renderInline(t.tokens) : (t.text ?? '');
+    }
+  }
+  function renderBlock(t, width) {
+    switch (t.type) {
+      case 'heading': {
+        const prefix = '#'.repeat(t.depth) + ' ';
+        const inline = renderInline(t.tokens);
+        if (t.depth === 1) {
+          const w = displayWidth(prefix + stripAnsi(inline));
+          return `${BOLD}${C.heading}${prefix}${inline}${RESET}\n${C.border}${'\u2500'.repeat(Math.max(2, w))}${RESET}\n\n`;
+        }
+        return `\n${BOLD}${C.heading}${prefix}${inline}${RESET}\n\n`;
+      }
+      case 'paragraph': {
+        const inline = renderInline(t.tokens);
+        const body = width ? wrapWords(inline, width).join('\n') : inline;
+        return `${body}\n\n`;
+      }
+      case 'list': {
+        const lines = [];
+        t.items.forEach((item, i) => {
+          const bullet = t.ordered ? `${i + 1}. ` : `${C.bullet}\u2022${RESET} `;
+          const inner = renderInline(item.tokens).trim();
+          if (!width) { lines.push(`  ${bullet}${inner}`); return; }
+          const bulletW = 2 + displayWidth(stripAnsi(bullet));
+          const wrapped = wrapWords(inner, Math.max(1, width - bulletW));
+          const pad = ' '.repeat(bulletW);
+          lines.push(`  ${bullet}${wrapped[0]}`);
+          for (let k = 1; k < wrapped.length; k++) lines.push(pad + wrapped[k]);
+        });
+        return lines.join('\n') + '\n\n';
+      }
+      case 'code': {
+        const body = t.text.replace(/\n$/, '');
+        return `${body}\n\n`;
+      }
+      case 'blockquote': {
+        const innerWidth = width ? Math.max(1, width - 2) : 0;
+        const inner = (t.tokens ?? []).map((tk) => renderBlock(tk, innerWidth)).join('').trimEnd();
+        return inner.split('\n').map((l) => `${C.border}\u2502${RESET} ${l}`).join('\n') + '\n\n';
+      }
+      case 'hr': return `${C.hr}${'\u2500'.repeat(40)}${RESET}\n\n`;
+      case 'table': {
+        const header = t.header.map((c) => renderInline(c.tokens)).join(' | ');
+        const rows = t.rows.map((r) => r.map((c) => renderInline(c.tokens)).join(' | '));
+        return [header, ...rows].map((r) => `  ${r}`).join('\n') + '\n\n';
+      }
+      case 'space':
+      case 'html': return '';
+      default: return renderInline([t]);
+    }
+  }
 
-## Project 2: Operating System
+  // ========================================================================
+  // Virtual filesystem: documents (slugs) at /, commands in /bin.
+  // ========================================================================
+  const docSlugs = Object.keys(DOCS);
 
-A small hobby OS written in Rust.
+  function isDoc(slug) {
+    return DOCS.hasOwnProperty(slug);
+  }
+  function isDir(slug) {
+    if (slug === '' || slug === 'bin') return true;
+    const prefix = slug + '/';
+    return docSlugs.some((d) => d.startsWith(prefix));
+  }
+  function isFile(slug) {
+    if (slug === '' || slug === 'bin') return false;
+    if (isDoc(slug)) return true;
+    if (slug.startsWith('bin/')) {
+      const name = slug.slice(4);
+      const c = registry.get(name);
+      return c && !c.builtin && !c.doc;
+    }
+    return false;
+  }
+  function childrenOf(slug) {
+    if (slug === 'bin') {
+      return registry.list()
+        .filter((c) => !c.builtin && !c.doc)
+        .map((c) => ({ name: c.name, dir: false }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+    const prefix = slug === '' ? '' : slug + '/';
+    const files = new Set();
+    const dirs = new Set();
+    for (const d of docSlugs) {
+      if (prefix === '') {
+        const i = d.indexOf('/');
+        if (i === -1) files.add(d); else dirs.add(d.slice(0, i));
+      } else if (d.startsWith(prefix)) {
+        const rest = d.slice(prefix.length);
+        const i = rest.indexOf('/');
+        if (i === -1) files.add(rest); else dirs.add(rest.slice(0, i));
+      }
+    }
+    return [
+      ...(slug === '' ? [{ name: 'bin', dir: true }] : []),
+      ...[...dirs].sort().map((name) => ({ name, dir: true })),
+      ...[...files].sort().map((name) => ({ name, dir: false })),
+    ];
+  }
 
-**Features:**
-- Memory management
-- Process scheduling
-- File system
+  function resolvePath(name, cwd) {
+    const full = name.startsWith('/') ? name : cwd.replace(/\/$/, '') + '/' + name;
+    const parts = [];
+    for (const seg of full.split('/')) {
+      if (seg === '' || seg === '.') continue;
+      if (seg === '..') parts.pop();
+      else parts.push(seg);
+    }
+    return parts.join('/');
+  }
 
-## Project 3: Graphics Engine
+  function parseLine(line) {
+    const argv = [];
+    let cur = '', inQuotes = false;
+    for (const c of line) {
+      if (c === '"') { inQuotes = !inQuotes; continue; }
+      if (!inQuotes && /\s/.test(c)) { if (cur) { argv.push(cur); cur = ''; } continue; }
+      cur += c;
+    }
+    if (cur) argv.push(cur);
+    return argv;
+  }
 
-A 2D/3D graphics engine for games.` },
-    '/Users/you/Documents/resume.md': { type: 'file', content: `# Resume
+  function splitPipe(line) {
+    const parts = [];
+    let cur = '', inQ = false;
+    for (const c of line) {
+      if (c === '"') { inQ = !inQ; cur += c; }
+      else if (c === '|' && !inQ) { parts.push(cur); cur = ''; }
+      else cur += c;
+    }
+    parts.push(cur);
+    return parts.map((s) => s.trim()).filter((s) => s.length > 0);
+  }
 
-## Experience
+  function commonPrefix(arr) {
+    if (arr.length === 0) return '';
+    let pre = arr[0];
+    for (const w of arr) { while (!w.startsWith(pre)) pre = pre.slice(0, -1); }
+    return pre;
+  }
 
-### Software Engineer
-**Company Name** | 2020 - Present
+  function globMatch(glob, name) {
+    const re = new RegExp(
+      '^' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$'
+    );
+    return re.test(name);
+  }
 
-- Developed web applications using React and Node.js
-- Implemented real-time features using WebSockets
-
-### Junior Developer
-**Another Company** | 2018 - 2020
-
-- Built RESTful APIs
-- Wrote unit and integration tests
-
-## Education
-
-### Bachelor of Science in Computer Science
-**University Name** | 2014 - 2018
-
-- GPA: 3.8/4.0` },
-    '/Users/you/Downloads': { type: 'dir', children: [] },
-    '/Users/you/Pictures': { type: 'dir', children: [] },
-    '/Users/you/readme.txt': { type: 'file', content: 'Welcome to Macintosh!\nType "help" to see available commands.\n\nThink Different.' },
-    '/bin': { type: 'dir', children: ['ls', 'cat', 'cd', 'pwd', 'clear', 'help', 'echo', 'date', 'whoami', 'tree', 'head', 'tail', 'grep', 'find', 'wc', 'more', 'less'] },
-    '/bin/ls': { type: 'file', content: 'list directory contents' },
-    '/bin/cat': { type: 'file', content: 'concatenate and display files' },
-    '/bin/cd': { type: 'file', content: 'change directory' },
-    '/bin/pwd': { type: 'file', content: 'print working directory' },
-    '/bin/clear': { type: 'file', content: 'clear the screen' },
-    '/bin/help': { type: 'file', content: 'display help information' },
-    '/bin/echo': { type: 'file', content: 'display a line of text' },
-    '/bin/date': { type: 'file', content: 'display the current date and time' },
-    '/bin/whoami': { type: 'file', content: 'print current user name' },
-    '/bin/tree': { type: 'file', content: 'display directory tree' },
-    '/bin/head': { type: 'file', content: 'output the first lines of a file' },
-    '/bin/tail': { type: 'file', content: 'output the last lines of a file' },
-    '/bin/grep': { type: 'file', content: 'search for patterns' },
-    '/bin/find': { type: 'file', content: 'find files' },
-    '/bin/wc': { type: 'file', content: 'word count' },
-    '/bin/more': { type: 'file', content: 'pager' },
-    '/bin/less': { type: 'file', content: 'pager' },
-    '/help.txt': { type: 'file', content: `Macintosh Terminal v1.0
-======================
-
-Available Commands:
-
-  ls [path]        List directory contents
-  cat <file>       Display file contents
-  cd <path>        Change directory
-  pwd              Print working directory
-  tree [path]      Display directory tree
-  head [-n N]      Show first N lines (default 10)
-  tail [-n N]      Show last N lines (default 10)
-  grep <pattern>   Search for pattern in files
-  find [path]      Find files
-  wc               Word count
-  more <file>      View file (space/q)
-  less <file>      View file (arrows/q)
-  echo <text>      Display text
-  date             Show current date/time
-  whoami           Show current user
-  help             Show this help message
-  history          Show command history
-  about            About this Mac
-
-Navigation:
-  cd ~             Go to home directory
-  cd ..            Go to parent directory
-  cd /             Go to root directory
-
-Pipes:
-  cmd1 | cmd2      Pipe output to next command
-  Example: cat bio.md | grep JavaScript
-
-Keyboard Shortcuts:
-  Ctrl-C           Cancel current command
-  Ctrl-L           Clear screen
-  Ctrl-A           Move to start of line
-  Ctrl-E           Move to end of line
-  Ctrl-U           Clear line
-  Ctrl-K           Kill to end of line
-  Ctrl-W           Delete word backward
-  Tab              Autocomplete
-
-Think Different.` },
-    '/about.txt': { type: 'file', content: `Macintosh Terminal Homepage
-==========================
-
-This is a retro-style terminal homepage inspired by the original Macintosh (1984) and jyy.github.io.
-
-Features:
-- Full xterm.js terminal emulation
-- Virtual file system with directories
-- Command history and autocomplete
-- Markdown rendering
-- Pipe support (cmd1 | cmd2)
-- Pager (more/less) for long content
-- CRT visual effects
-
-Built with:
-- xterm.js (terminal emulator)
-- Vanilla JavaScript
-- Pure CSS
-
-Think Different.` }
+  // ========================================================================
+  // Command registry
+  // ========================================================================
+  const registry = {
+    map: new Map(),
+    register(cmd) { this.map.set(cmd.name, cmd); },
+    get(name) { return this.map.get(name); },
+    list() { return [...this.map.values()]; },
   };
 
-  // ==================== Shell State ====================
-  let cwd = CONFIG.home;
-  const history = [];
-  let historyIndex = -1;
-  let buffer = '';
-  let cursorPos = 0;
+  // ========================================================================
+  // Terminal wrapper (shell mode + tui mode)
+  // ========================================================================
+  const termHost = document.getElementById('term-host');
+  const termScreen = document.getElementById('term-screen');
 
-  // ==================== Terminal Setup ====================
-  const term = new Terminal({
-    fontFamily: "'Chicago', 'Geneva', 'Monaco', 'Courier New', monospace",
+  function internalPage(target) {
+    if (target.startsWith('#')) return target.slice(1) || null;
+    try {
+      const u = new URL(target, location.href);
+      if (u.origin === location.origin && u.pathname === location.pathname && u.hash) {
+        return u.hash.slice(1) || null;
+      }
+    } catch (e) { /* not a url */ }
+    return null;
+  }
+
+  let onNavigate = null;
+
+  const xterm = new Terminal({
+    fontFamily: 'Monaco, "SF Mono", Menlo, Consolas, "Courier New", monospace',
     fontSize: 14,
-    lineHeight: 1.3,
+    lineHeight: 1.0,
     letterSpacing: 0,
     cursorBlink: true,
-    cursorStyle: 'block',
-    cursorInactiveStyle: 'outline',
-    scrollback: 10000,
     allowProposedApi: true,
+    linkHandler: {
+      allowNonHttpProtocols: true,
+      activate: (_event, target) => {
+        const page = internalPage(target);
+        if (page !== null) { onNavigate && onNavigate(page); return; }
+        window.open(target, '_blank', 'noopener');
+      },
+    },
     theme: {
       background: '#ffffff',
-      foreground: '#000000',
-      cursor: '#000000',
+      foreground: '#111111',
+      cursor: '#111111',
       cursorAccent: '#ffffff',
-      selectionBackground: '#000000',
+      selectionBackground: '#111111',
       selectionForeground: '#ffffff',
-      black: '#000000',
-      red: '#000000',
-      green: '#555555',
-      yellow: '#888888',
-      blue: '#000000',
-      magenta: '#000000',
-      cyan: '#555555',
-      white: '#ffffff',
-      brightBlack: '#888888',
-      brightRed: '#888888',
-      brightGreen: '#aaaaaa',
-      brightYellow: '#aaaaaa',
-      brightBlue: '#888888',
-      brightMagenta: '#888888',
-      brightCyan: '#aaaaaa',
-      brightWhite: '#ffffff'
-    }
+    },
   });
 
-  // Load addons
   const fitAddon = new FitAddon.FitAddon();
-  const unicodeAddon = new Unicode11Addon.Unicode11Addon();
-  term.loadAddon(fitAddon);
-  term.loadAddon(unicodeAddon);
-  term.unicode.activeVersion = '11';
+  xterm.loadAddon(fitAddon);
+  try {
+    xterm.loadAddon(new Unicode11Addon.Unicode11Addon());
+    xterm.unicode.activeVersion = '11';
+  } catch (e) { console.warn('unicode11 addon unavailable', e); }
+  xterm.open(termScreen);
 
-  // Mount terminal
-  term.open(document.getElementById('term-screen'));
-  fitAddon.fit();
+  let mode = 'shell';
+  let shellDataCb = null;
+  let tuiKeyCb = null;
 
-  // Auto-resize
-  const resizeObserver = new ResizeObserver(() => fitAddon.fit());
-  resizeObserver.observe(document.getElementById('term-host'));
+  xterm.onData((d) => { if (mode === 'shell') shellDataCb && shellDataCb(d); });
+  xterm.onKey((e) => { if (mode === 'tui') tuiKeyCb && tuiKeyCb(e); });
 
-  // ==================== File System Functions ====================
-  function resolvePath(path) {
-    if (path === '~' || path.startsWith('~/')) {
-      path = CONFIG.home + path.slice(1);
-    }
-    if (!path.startsWith('/')) {
-      path = cwd + (cwd === '/' ? '' : '/') + path;
-    }
-    const parts = path.split('/').filter(Boolean);
-    const normalized = [];
-    for (const part of parts) {
-      if (part === '.') continue;
-      if (part === '..') { normalized.pop(); continue; }
-      normalized.push(part);
-    }
-    return '/' + normalized.join('/');
-  }
-
-  function fileExists(path) { return fs.hasOwnProperty(path); }
-  function isDir(path) { return fileExists(path) && fs[path].type === 'dir'; }
-  function isFile(path) { return fileExists(path) && fs[path].type === 'file'; }
-  function readFile(path) { return isFile(path) ? fs[path].content : null; }
-  function listDir(path) { return isDir(path) ? (fs[path].children || []) : null; }
-
-  function getDisplayCwd() {
-    if (cwd === CONFIG.home) return '~';
-    if (cwd.startsWith(CONFIG.home + '/')) return '~' + cwd.slice(CONFIG.home.length);
-    return cwd;
-  }
-
-  // ==================== Markdown Renderer ====================
-  function renderMarkdown(text) {
-    try {
-      if (typeof marked !== 'undefined') {
-        marked.setOptions({ breaks: true, gfm: true });
-        // Convert HTML to ANSI-like terminal output
-        let html = marked.parse(text);
-        return htmlToAnsi(html);
-      }
-    } catch(e) {}
-    return text;
-  }
-
-  function htmlToAnsi(html) {
-    let result = html;
-    // Headers
-    result = result.replace(/<h1[^>]*>(.*?)<\/h1>/gs, '\x1b[1m\x1b[4m $1 \x1b[0m\n' + '═'.repeat(40));
-    result = result.replace(/<h2[^>]*>(.*?)<\/h2>/gs, '\x1b[1m $1 \x1b[0m\n' + '─'.repeat(30));
-    result = result.replace(/<h3[^>]*>(.*?)<\/h3>/gs, '\x1b[1m$1\x1b[0m');
-    // Bold
-    result = result.replace(/<strong>(.*?)<\/strong>/gs, '\x1b[1m$1\x1b[0m');
-    result = result.replace(/<b>(.*?)<\/b>/gs, '\x1b[1m$1\x1b[0m');
-    // Italic
-    result = result.replace(/<em>(.*?)<\/em>/gs, '\x1b[3m$1\x1b[0m');
-    result = result.replace(/<i>(.*?)<\/i>/gs, '\x1b[3m$1\x1b[0m');
-    // Code
-    result = result.replace(/<code>(.*?)<\/code>/gs, '\x1b[7m$1\x1b[0m');
-    // Lists
-    result = result.replace(/<li>(.*?)<\/li>/gs, '  • $1');
-    result = result.replace(/<br\s*\/?>/gs, '\n');
-    // Paragraphs
-    result = result.replace(/<p>(.*?)<\/p>/gs, '$1\n');
-    result = result.replace(/<\/?[^>]+(>|$)/g, '');
-    result = result.replace(/&amp;/g, '&');
-    result = result.replace(/&lt;/g, '<');
-    result = result.replace(/&gt;/g, '>');
-    result = result.replace(/&nbsp;/g, ' ');
-    return result.trim();
-  }
-
-  // ==================== Tree Generator ====================
-  function generateTree(path, prefix) {
-    const items = listDir(path);
-    if (!items) return '';
-    let result = '';
-    items.forEach((item, i) => {
-      const isLast = i === items.length - 1;
-      const connector = isLast ? '└── ' : '├── ';
-      const fullPath = path === '/' ? '/' + item : path + '/' + item;
-      const isItemDir = isDir(fullPath);
-      result += prefix + connector + item + (isItemDir ? '/' : '') + '\n';
-      if (isItemDir) {
-        result += generateTree(fullPath, prefix + (isLast ? '    ' : '│   '));
-      }
-    });
-    return result;
-  }
-
-  // ==================== Commands ====================
-  const commands = {
-    ls: (args) => {
-      const path = args[0] ? resolvePath(args[0]) : cwd;
-      const items = listDir(path);
-      if (!items) return `ls: ${args[0] || path}: No such file or directory`;
-      if (items.length === 0) return null;
-      return items.map(item => {
-        const fp = path === '/' ? '/' + item : path + '/' + item;
-        return item + (isDir(fp) ? '/' : '');
-      }).join('  ');
+  const term = {
+    get cols() { return xterm.cols; },
+    get rows() { return xterm.rows; },
+    write(s) { xterm.write(String(s).replace(/(?<!\r)\n/g, '\r\n')); },
+    print(s) { this.write(s + '\n'); },
+    clear() { xterm.clear(); },
+    reset() { xterm.reset(); },
+    focus() { xterm.focus(); },
+    fit() { fitAddon.fit(); },
+    onShellData(cb) { shellDataCb = cb; },
+    takeOver() {
+      mode = 'tui';
+      return {
+        get cols() { return xterm.cols; },
+        get rows() { return xterm.rows; },
+        write: (s) => xterm.write(s),
+        clear: () => xterm.reset(),
+        onKey: (cb) => { tuiKeyCb = cb; },
+        release: () => { mode = 'shell'; },
+      };
     },
-
-    cat: (args) => {
-      if (args.length === 0) return 'Usage: cat <file>';
-      const path = resolvePath(args[0]);
-      const content = readFile(path);
-      if (content === null) return `cat: ${args[0]}: No such file or directory`;
-      if (args[0].endsWith('.md')) return { markdown: content };
-      return content;
-    },
-
-    cd: (args) => {
-      const path = args[0] || '~';
-      const resolved = resolvePath(path);
-      if (!isDir(resolved)) return `cd: no such file or directory: ${path}`;
-      cwd = resolved;
-      return null;
-    },
-
-    pwd: () => cwd,
-
-    tree: (args) => {
-      const path = args[0] ? resolvePath(args[0]) : cwd;
-      if (!isDir(path)) return `tree: ${path}: Not a directory`;
-      return path + '\n' + generateTree(path, '');
-    },
-
-    head: (args) => {
-      let n = 10;
-      let file = null;
-      for (let i = 0; i < args.length; i++) {
-        if (args[i] === '-n' && args[i+1]) { n = parseInt(args[i+1]) || 10; i++; }
-        else file = args[i];
-      }
-      if (!file) return 'Usage: head [-n N] <file>';
-      const content = readFile(resolvePath(file));
-      if (content === null) return `head: ${file}: No such file`;
-      return content.split('\n').slice(0, n).join('\n');
-    },
-
-    tail: (args) => {
-      let n = 10;
-      let file = null;
-      for (let i = 0; i < args.length; i++) {
-        if (args[i] === '-n' && args[i+1]) { n = parseInt(args[i+1]) || 10; i++; }
-        else file = args[i];
-      }
-      if (!file) return 'Usage: tail [-n N] <file>';
-      const content = readFile(resolvePath(file));
-      if (content === null) return `tail: ${file}: No such file`;
-      const lines = content.split('\n');
-      return lines.slice(-n).join('\n');
-    },
-
-    grep: (args) => {
-      if (args.length < 1) return 'Usage: grep <pattern> [file]';
-      const pattern = args[0];
-      const file = args[1];
-      if (!file) {
-        // Search all files in current directory
-        const items = listDir(cwd);
-        let results = '';
-        items.forEach(item => {
-          const fp = cwd === '/' ? '/' + item : cwd + '/' + item;
-          const content = readFile(fp);
-          if (content) {
-            const matches = content.split('\n').filter(l => l.includes(pattern));
-            if (matches.length > 0) {
-              results += item + ':\n' + matches.map(m => '  ' + m).join('\n') + '\n';
-            }
-          }
-        });
-        return results || `grep: no matches for "${pattern}"`;
-      }
-      const content = readFile(resolvePath(file));
-      if (!content) return `grep: ${file}: No such file`;
-      const matches = content.split('\n').filter(l => l.includes(pattern));
-      return matches.length > 0 ? matches.join('\n') : null;
-    },
-
-    find: (args) => {
-      const searchPath = args[0] ? resolvePath(args[0]) : cwd;
-      const results = [];
-      function walk(path) {
-        if (isFile(path)) results.push(path);
-        const items = listDir(path);
-        if (items) items.forEach(item => {
-          const fp = path === '/' ? '/' + item : path + '/' + item;
-          walk(fp);
-        });
-      }
-      walk(searchPath);
-      return results.join('\n');
-    },
-
-    wc: (args) => {
-      const file = args[0];
-      if (!file) return 'Usage: wc <file>';
-      const content = readFile(resolvePath(file));
-      if (!content) return `wc: ${file}: No such file`;
-      const lines = content.split('\n').length;
-      const words = content.split(/\s+/).filter(Boolean).length;
-      const chars = content.length;
-      return `  ${lines}  ${words}  ${chars} ${file}`;
-    },
-
-    more: (args) => {
-      const file = args[0];
-      if (!file) return 'Usage: more <file>';
-      const content = readFile(resolvePath(file));
-      if (!content) return `more: ${file}: No such file`;
-      return { pager: content, mode: 'more' };
-    },
-
-    less: (args) => {
-      const file = args[0];
-      if (!file) return 'Usage: less <file>';
-      const content = readFile(resolvePath(file));
-      if (!content) return `less: ${file}: No such file`;
-      return { pager: content, mode: 'less' };
-    },
-
-    echo: (args) => args.join(' '),
-
-    date: () => new Date().toString(),
-
-    whoami: () => CONFIG.username,
-
-    hostname: () => CONFIG.hostname,
-
-    clear: () => { term.write('\x1b[2J\x1b[3J\x1b[H'); return null; },
-
-    help: () => readFile('/help.txt'),
-
-    about: () => readFile('/about.txt'),
-
-    history: () => history.map((cmd, i) => `  ${i + 1}  ${cmd}`).join('\n'),
   };
 
-  // ==================== Autocomplete ====================
-  function autocomplete(partial) {
-    const candidates = [];
-    for (const cmd of Object.keys(commands)) {
-      if (cmd.startsWith(partial)) candidates.push(cmd);
-    }
-    const items = listDir(cwd);
-    if (items) {
-      for (const item of items) {
-        if (item.startsWith(partial)) candidates.push(item);
-      }
-    }
-    return [...new Set(candidates)];
-  }
+  new ResizeObserver(() => term.fit()).observe(termHost);
 
-  // ==================== Prompt ====================
-  function getPrompt() {
-    return `\x1b[1m${CONFIG.username}@${CONFIG.hostname}\x1b[0m:\x1b[1m${getDisplayCwd()}\x1b[0m$ `;
-  }
+  // ========================================================================
+  // Shell — REPL with inline line editor
+  // ========================================================================
+  let cwd = '';
+  let curPrompt = '';
+  let curWidth = 0;
+  let buffer = '';
+  let cursor = 0;
+  let history = [];
+  let histIdx = -1;
+  let resolveLine = null;
 
-  // ==================== Pager (more/less) ====================
-  let pagerState = null;
-
-  function enterPager(content, mode) {
-    const lines = content.split('\n');
-    const pageSize = Math.max(10, term.rows - 3);
-    pagerState = {
-      lines,
-      mode,
-      pageStart: 0,
-      pageSize,
-      totalPages: Math.ceil(lines.length / pageSize)
+  function promptFor() {
+    const loc = '/' + cwd;
+    return {
+      text: `\x1b[1m${SITE.user}\x1b[0m@\x1b[1m${SITE.host}\x1b[0m:\x1b[1m${loc}\x1b[0m${DIM}$\x1b[0m `,
+      width: `${SITE.user}@${SITE.host}:${loc}$ `.length,
     };
-    renderPagerPage();
   }
 
-  function renderPagerPage() {
-    if (!pagerState) return;
-    const { lines, pageStart, pageSize, mode, totalPages } = pagerState;
-    const pageEnd = Math.min(pageStart + pageSize, lines.length);
-    const page = lines.slice(pageStart, pageEnd).join('\n');
-    const percent = Math.round((pageEnd / lines.length) * 100);
-    const status = mode === 'more' ? '--More--' : `--Less-- (${percent}%)`;
-
-    term.write('\x1b[2J\x1b[3J\x1b[H');
-    term.write(page);
-    term.write(`\x1b[7m${status}\x1b[0m`);
-  }
-
-  function handlePagerInput(data) {
-    if (!pagerState) return false;
-    const { lines, pageSize, mode } = pagerState;
-    const maxStart = Math.max(0, lines.length - pageSize);
-
-    switch(data) {
-      case 'q':
-      case '\x1b':
-        pagerState = null;
-        term.write('\x1b[2J\x1b[3J\x1b[H');
-        term.write(getPrompt() + buffer);
-        return true;
-      case ' ':
-      case 'f':
-      case '\x1b[6~': // PageDown
-        pagerState.pageStart = Math.min(pagerState.pageStart + pageSize, maxStart);
-        renderPagerPage();
-        return true;
-      case 'b':
-      case '\x1b[5~': // PageUp
-        pagerState.pageStart = Math.max(0, pagerState.pageStart - pageSize);
-        renderPagerPage();
-        return true;
-      case '\x1b[B': // Down
-      case 'j':
-      case '\r':
-        if (pagerState.pageStart < maxStart) {
-          pagerState.pageStart++;
-          renderPagerPage();
-        }
-        return true;
-      case '\x1b[A': // Up
-      case 'k':
-        if (pagerState.pageStart > 0) {
-          pagerState.pageStart--;
-          renderPagerPage();
-        }
-        return true;
-      case 'g':
-        pagerState.pageStart = 0;
-        renderPagerPage();
-        return true;
-      case 'G':
-        pagerState.pageStart = maxStart;
-        renderPagerPage();
-        return true;
-      case '\x04': // Ctrl-D
-        pagerState.pageStart = Math.min(pagerState.pageStart + Math.floor(pageSize/2), maxStart);
-        renderPagerPage();
-        return true;
-      case '\x15': // Ctrl-U
-        pagerState.pageStart = Math.max(0, pagerState.pageStart - Math.floor(pageSize/2));
-        renderPagerPage();
-        return true;
+  async function start() {
+    term.onShellData((d) => onData(d));
+    if (initialCommand) {
+      const { text } = promptFor();
+      term.write(text + initialCommand + '\r\n');
+      await execute(initialCommand);
     }
-    return true;
+    for (;;) {
+      buffer = ''; cursor = 0; histIdx = -1;
+      const { text, width } = promptFor();
+      curPrompt = text; curWidth = width;
+      term.write(curPrompt);
+      const line = await readLine();
+      await execute(line);
+    }
   }
 
-  // ==================== Command Execution ====================
-  function executeCommand(line) {
+  function inject(command) {
+    if (!resolveLine) return;
+    term.write(command + '\r\n');
+    const r = resolveLine;
+    resolveLine = null;
+    r(command);
+  }
+
+  function readLine() {
+    return new Promise((resolve) => { resolveLine = resolve; });
+  }
+
+  async function execute(line) {
     const trimmed = line.trim();
     if (!trimmed) return;
-
     history.push(trimmed);
-    historyIndex = history.length;
+    document.title = `~${SITE.user}: ${trimmed}`;
 
-    // Handle pipes
-    const pipeline = trimmed.split('|').map(s => s.trim());
-    let lastOutput = null;
-
-    for (let i = 0; i < pipeline.length; i++) {
-      const parts = pipeline[i].split(/\s+/);
-      const cmd = parts[0];
-      const args = parts.slice(1);
-
-      if (commands[cmd]) {
-        try {
-          lastOutput = commands[cmd](args);
-        } catch(e) {
-          term.write(`Error: ${e.message}\r\n`);
-          return;
-        }
-
-        if (lastOutput === null) continue;
-
-        if (typeof lastOutput === 'object') {
-          if (lastOutput.pager) {
-            enterPager(lastOutput.pager, lastOutput.mode);
-            return;
-          }
-          if (lastOutput.markdown) {
-            lastOutput = renderMarkdown(lastOutput.markdown);
-          }
-        }
-
-        // If not last command, pass to next as string
-        if (i < pipeline.length - 1) {
-          // Continue to next command (lastOutput becomes input)
-        }
-      } else {
-        term.write(`Macintosh: command not found: ${cmd}\r\n`);
+    const segments = splitPipe(trimmed);
+    let stdin = '';
+    for (let i = 0; i < segments.length; i++) {
+      const argv = parseLine(segments[i]);
+      const name = argv[0];
+      const p = resolvePath(name, cwd);
+      const cmd = registry.get(name) ?? registry.get(p) ??
+        (p.startsWith('bin/') ? registry.get(p.slice(4)) : undefined);
+      if (!cmd) {
+        term.print(`command not found: ${name} — try help`);
         return;
       }
-    }
 
-    if (lastOutput !== null && lastOutput !== undefined) {
-      const lines = String(lastOutput).split('\n');
-      lines.forEach(line => term.write(line + '\r\n'));
+      const isLast = i === segments.length - 1;
+      let outBuffer = '';
+      const stdout = isLast
+        ? { write: (s) => term.write(s), print: (s) => term.print(s) }
+        : { write: (s) => { outBuffer += s; }, print: (s) => { outBuffer += s + '\n'; } };
+
+      const ctx = {
+        term, stdin, stdout, tty: isLast, cwd,
+        resolve: (n) => registry.get(n),
+        list: () => registry.list(),
+        chdir: (t) => chdir(t),
+        listDir: (t) => listDir(t),
+      };
+
+      try { await cmd.run(ctx, argv); }
+      catch (e) { term.print(`error: ${String(e)}`); return; }
+      stdin = outBuffer;
     }
   }
 
-  // ==================== Input Handling ====================
-  function showPrompt() {
-    term.write(getPrompt());
-    buffer = '';
-    cursorPos = 0;
+  function chdir(target) {
+    const p = resolvePath(target, cwd);
+    if (isDir(p)) { cwd = p; return null; }
+    return `${target}: not a directory`;
+  }
+  function listDir(target) {
+    const p = resolvePath(target, cwd);
+    if (p === '') return [{ name: 'bin', dir: true }, ...docSlugs.map((d) => ({ name: d, dir: false }))];
+    if (p === 'bin') return childrenOf('bin');
+    if (isDoc(p)) return [{ name: p, dir: false }];
+    return null;
   }
 
-  term.onData(data => {
-    // Handle pager mode
-    if (pagerState) {
-      handlePagerInput(data);
-      return;
-    }
-
-    // Ctrl key combinations
-    if (data.charCodeAt(0) < 32 && data.length === 1) {
-      const code = data.charCodeAt(0);
-      switch(code) {
-        case 3: // Ctrl-C
-          term.write('^C\r\n');
-          showPrompt();
-          return;
-        case 4: // Ctrl-D
-          if (buffer.length === 0) {
-            term.write('\r\nGoodbye!\r\n');
-            term.write('\x1b[?25l'); // Hide cursor
-          }
-          return;
-        case 7: // Ctrl-G
-          term.write('\x07');
-          return;
-        case 8: // Ctrl-H (Backspace)
-          if (cursorPos > 0) {
-            buffer = buffer.slice(0, cursorPos - 1) + buffer.slice(cursorPos);
-            cursorPos--;
-            redrawInput();
-          }
-          return;
-        case 11: // Ctrl-K
-          buffer = buffer.slice(0, cursorPos);
-          term.write('\x1b[K');
-          return;
-        case 12: // Ctrl-L
-          term.write('\x1b[2J\x1b[3J\x1b[H');
-          showPrompt();
-          return;
-        case 21: // Ctrl-U
-          buffer = buffer.slice(cursorPos);
-          cursorPos = 0;
-          redrawInput();
-          return;
-        case 23: // Ctrl-W
-          const before = buffer.slice(0, cursorPos);
-          const after = buffer.slice(cursorPos);
-          const newBefore = before.replace(/\S+\s*$/, '');
-          buffer = newBefore + after;
-          cursorPos = newBefore.length;
-          redrawInput();
-          return;
+  // ---- inline line editor ----
+  function onData(d) {
+    if (!resolveLine) return;
+    switch (d) {
+      case '\r':
+      case '\n': {
+        const line = buffer;
+        term.write('\r\n');
+        const r = resolveLine;
+        resolveLine = null;
+        r(line);
+        break;
       }
-    }
-
-    // Special keys
-    if (data.startsWith('\x1b')) {
-      switch(data) {
-        case '\x1b[A': // Up
-          if (history.length > 0 && historyIndex > 0) {
-            historyIndex--;
-            buffer = history[historyIndex];
-            cursorPos = buffer.length;
-            redrawInput();
-          }
-          return;
-        case '\x1b[B': // Down
-          if (historyIndex < history.length - 1) {
-            historyIndex++;
-            buffer = history[historyIndex];
-            cursorPos = buffer.length;
-            redrawInput();
-          } else {
-            historyIndex = history.length;
-            buffer = '';
-            cursorPos = 0;
-            redrawInput();
-          }
-          return;
-        case '\x1b[D': // Left
-          if (cursorPos > 0) {
-            cursorPos--;
-            term.write('\x1b[D');
-          }
-          return;
-        case '\x1b[C': // Right
-          if (cursorPos < buffer.length) {
-            cursorPos++;
-            term.write('\x1b[C');
-          }
-          return;
-        case '\x1b[H': // Home
-          while (cursorPos > 0) { cursorPos--; term.write('\x1b[D'); }
-          return;
-        case '\x1b[F': // End
-          while (cursorPos < buffer.length) { cursorPos++; term.write('\x1b[C'); }
-          return;
-        case '\x1b[3~': // Delete
-          if (cursorPos < buffer.length) {
-            buffer = buffer.slice(0, cursorPos) + buffer.slice(cursorPos + 1);
-            redrawInput();
-          }
-          return;
-      }
-      return;
-    }
-
-    // Tab
-    if (data === '\t') {
-      const beforeCursor = buffer.slice(0, cursorPos);
-      const parts = beforeCursor.split(/\s+/);
-      const partial = parts[parts.length - 1];
-      if (partial) {
-        const candidates = autocomplete(partial);
-        if (candidates.length === 1) {
-          parts[parts.length - 1] = candidates[0];
-          const suffix = isDir(resolvePath(candidates[0])) ? '/' : ' ';
-          buffer = parts.join(' ') + suffix + buffer.slice(cursorPos);
-          cursorPos = parts.join(' ').length + suffix.length;
-          redrawInput();
-        } else if (candidates.length > 1) {
-          term.write('\r\n' + candidates.join('  ') + '\r\n');
-          term.write(getPrompt() + buffer);
-          // Reset cursor
-          const promptLen = getPrompt().length;
-          for (let i = buffer.length; i > cursorPos; i--) term.write('\x1b[D');
+      case '\x7f':
+      case '\b': {
+        if (cursor > 0) {
+          const cut = prevClusterStart(buffer, cursor);
+          buffer = buffer.slice(0, cut) + buffer.slice(cursor);
+          cursor = cut;
+          redraw();
         }
+        break;
       }
+      case '\x1b[A': case '\x1bOA': case '\x10': histMove('up'); break;
+      case '\x1b[B': case '\x1bOB': case '\x0e': histMove('down'); break;
+      case '\x1b[C': case '\x06':
+        if (cursor < buffer.length) { cursor++; gotoCursor(); }
+        break;
+      case '\x1b[D': case '\x02':
+        if (cursor > 0) { cursor--; gotoCursor(); }
+        break;
+      case '\x01': cursor = 0; gotoCursor(); break;
+      case '\x05': cursor = buffer.length; gotoCursor(); break;
+      case '\x0b': buffer = buffer.slice(0, cursor); redraw(); break;
+      case '\x15': buffer = buffer.slice(cursor); cursor = 0; redraw(); break;
+      case '\x17': {
+        let i = cursor;
+        while (i > 0 && /\s/.test(buffer[i - 1])) i--;
+        while (i > 0 && !/\s/.test(buffer[i - 1])) i--;
+        buffer = buffer.slice(0, i) + buffer.slice(cursor);
+        cursor = i;
+        redraw();
+        break;
+      }
+      case '\x04':
+        if (buffer.length === 0) { cwd = ''; const r = resolveLine; resolveLine = null; r('index'); return; }
+        if (cursor < buffer.length) {
+          const end = nextClusterEnd(buffer, cursor);
+          buffer = buffer.slice(0, cursor) + buffer.slice(end);
+          redraw();
+        }
+        break;
+      case '\x0c': term.write('\x1b[2J\x1b[3J\x1b[H'); redraw(); break;
+      case '\x03':
+        term.write('^C\r\n');
+        if (resolveLine) { const r = resolveLine; resolveLine = null; r(''); }
+        break;
+      case '\t': complete(); break;
+      default:
+        if (d.length >= 1 && !/[\x00-\x1f\x7f]/.test(d)) {
+          buffer = buffer.slice(0, cursor) + d + buffer.slice(cursor);
+          cursor += d.length;
+          redraw();
+        }
+    }
+  }
+
+  function histMove(dir) {
+    const n = history.length;
+    if (n === 0) return;
+    if (dir === 'up') histIdx = histIdx === -1 ? n - 1 : Math.max(0, histIdx - 1);
+    else {
+      if (histIdx === -1) return;
+      histIdx++;
+      if (histIdx >= n) histIdx = -1;
+    }
+    const entry = histIdx === -1 ? '' : history[histIdx];
+    buffer = entry; cursor = entry.length;
+    redraw();
+  }
+
+  function complete() {
+    const before = buffer.slice(0, cursor);
+    const wordStart = before.lastIndexOf(' ') + 1;
+    const prefix = before.slice(wordStart);
+    const isFirstWord = wordStart === 0;
+
+    const entries = listDir('.') ?? [];
+    const names = new Set();
+    const dirs = new Set();
+    for (const e of entries) { names.add(e.name); if (e.dir) dirs.add(e.name); }
+    if (isFirstWord) for (const c of registry.list()) names.add(c.name);
+
+    const matches = [...names].filter((n) => n.startsWith(prefix)).sort();
+    if (matches.length === 0) { term.write('\x07'); return; }
+    if (matches.length === 1) {
+      const m = matches[0];
+      replaceWord(wordStart, m + (dirs.has(m) ? '/' : ' '));
       return;
     }
+    const lcp = commonPrefix(matches);
+    if (lcp.length > prefix.length) { replaceWord(wordStart, lcp); return; }
+    term.write('\r\n' + matches.join('  ') + '\r\n');
+    redraw();
+  }
 
-    // Enter
-    if (data === '\r') {
-      term.write('\r\n');
-      executeCommand(buffer);
-      if (!pagerState) showPrompt();
-      return;
-    }
+  function replaceWord(wordStart, replacement) {
+    buffer = buffer.slice(0, wordStart) + replacement + buffer.slice(cursor);
+    cursor = wordStart + replacement.length;
+    redraw();
+  }
 
-    // Regular character
-    if (data >= ' ' && data.length === 1) {
-      buffer = buffer.slice(0, cursorPos) + data + buffer.slice(cursorPos);
-      cursorPos++;
-      // Write the character and restore cursor if needed
-      if (cursorPos < buffer.length) {
-        term.write(data + buffer.slice(cursorPos));
-        // Move cursor back
-        for (let i = buffer.length; i > cursorPos; i--) term.write('\x1b[D');
-      } else {
-        term.write(data);
+  function redraw() {
+    term.write(`\r\x1b[0K${curPrompt}${buffer}`);
+    const back = displayWidth(buffer) - displayWidth(buffer.slice(0, cursor));
+    if (back > 0) term.write(`\x1b[${back}D`);
+  }
+  function gotoCursor() {
+    term.write(`\x1b[${curWidth + displayWidth(buffer.slice(0, cursor)) + 1}G`);
+  }
+
+  // ========================================================================
+  // Commands
+  // ========================================================================
+  registry.register({
+    name: 'ls', description: 'list directory contents: ls [dir]',
+    async run(ctx, argv) {
+      const target = argv[1] ?? '.';
+      const entries = ctx.listDir(target);
+      if (!entries) { ctx.stdout.print(`ls: ${target}: not a directory`); return; }
+      if (entries.length === 0) { ctx.stdout.print('(empty)'); return; }
+      for (const e of entries) {
+        const name = e.dir ? `${BOLD}${e.name}/${RESET}` : e.name;
+        ctx.stdout.print(`  ${name}`);
       }
-    }
+    },
   });
 
-  function redrawInput() {
-    term.write('\x1b[2K');
-    term.write('\r' + getPrompt() + buffer);
-    // Position cursor
-    const promptLen = getPrompt().length;
-    const targetCol = promptLen + cursorPos;
-    term.write(`\x1b[${targetCol}G`);
+  registry.register({
+    name: 'cat', description: 'print documents: cat <path> [path...]',
+    async run(ctx, argv) {
+      const paths = argv.slice(1);
+      if (paths.length === 0) { ctx.stdout.print('usage: cat <path> [path...]'); return; }
+      for (const path of paths) {
+        const doc = DOCS[resolvePath(path, ctx.cwd)];
+        if (!doc) { ctx.stdout.print(`cat: ${path}: no such file`); continue; }
+        ctx.stdout.write(renderMarkdown(doc, ctx.term.cols));
+      }
+    },
+  });
+
+  registry.register({
+    name: 'head', description: 'first lines: head [-n N] [path]',
+    async run(ctx, argv) {
+      let n = 10, file = null;
+      for (let i = 1; i < argv.length; i++) {
+        if (argv[i] === '-n' && argv[i + 1]) { n = parseInt(argv[i + 1], 10) || 10; i++; }
+        else file = argv[i];
+      }
+      let text = file ? DOCS[resolvePath(file, ctx.cwd)] : ctx.stdin;
+      if (file && !text) { ctx.stdout.print(`head: ${file}: no such file`); return; }
+      if (file) text = renderMarkdown(text, ctx.term.cols);
+      ctx.stdout.write((text || '').split('\n').slice(0, n).join('\n') + '\n');
+    },
+  });
+
+  registry.register({
+    name: 'tail', description: 'last lines: tail [-n N] [path]',
+    async run(ctx, argv) {
+      let n = 10, file = null;
+      for (let i = 1; i < argv.length; i++) {
+        if (argv[i] === '-n' && argv[i + 1]) { n = parseInt(argv[i + 1], 10) || 10; i++; }
+        else file = argv[i];
+      }
+      let text = file ? DOCS[resolvePath(file, ctx.cwd)] : ctx.stdin;
+      if (file && !text) { ctx.stdout.print(`tail: ${file}: no such file`); return; }
+      if (file) text = renderMarkdown(text, ctx.term.cols);
+      ctx.stdout.write((text || '').split('\n').slice(-n).join('\n') + '\n');
+    },
+  });
+
+  registry.register({
+    name: 'grep', description: 'filter lines: grep <pattern> [path]',
+    async run(ctx, argv) {
+      const pattern = argv[1];
+      if (!pattern) { ctx.stdout.print('usage: grep <pattern> [path]'); return; }
+      const file = argv[2];
+      let lines;
+      if (file) {
+        const doc = DOCS[resolvePath(file, ctx.cwd)];
+        if (!doc) { ctx.stdout.print(`grep: ${file}: no such file`); return; }
+        lines = renderMarkdown(doc, 0).split('\n');
+      } else {
+        lines = ctx.stdin.split('\n');
+      }
+      const matches = lines.filter((l) => l.includes(pattern));
+      if (matches.length) ctx.stdout.write(matches.join('\n') + '\n');
+    },
+  });
+
+  registry.register({
+    name: 'find', description: 'walk the FS: find [path] [-name GLOB] [-type f|d]',
+    async run(ctx, argv) {
+      let path = '.', nameGlob = null, typeFilter = null;
+      for (let i = 1; i < argv.length; i++) {
+        if (argv[i] === '-name') { nameGlob = argv[++i]; }
+        else if (argv[i] === '-type') { typeFilter = argv[++i]; }
+        else if (!argv[i].startsWith('-')) path = argv[i];
+      }
+      const root = resolvePath(path, ctx.cwd);
+      const results = [];
+      const walk = (slug) => {
+        if (isFile(slug)) {
+          const name = slug.split('/').pop();
+          const okName = !nameGlob || globMatch(nameGlob, name);
+          const okType = !typeFilter || typeFilter === 'f';
+          if (okName && okType) results.push(slug);
+        }
+        const kids = childrenOf(slug);
+        for (const k of kids) {
+          const child = slug === '' ? k.name : slug + '/' + k.name;
+          if (k.dir) {
+            const okType = !typeFilter || typeFilter === 'd';
+            if (okType && (!nameGlob || globMatch(nameGlob, k.name))) results.push(child);
+            walk(child);
+          }
+        }
+      };
+      if (root === 'bin') {
+        for (const c of registry.list().filter((c) => !c.builtin && !c.doc)) results.push('bin/' + c.name);
+      } else if (isDir(root)) walk(root);
+      else if (isFile(root)) results.push(root);
+      else { ctx.stdout.print(`find: ${path}: no such file or directory`); return; }
+      ctx.stdout.write(results.join('\n') + (results.length ? '\n' : ''));
+    },
+  });
+
+  registry.register({
+    name: 'tree', description: 'draw the FS: tree [path]',
+    async run(ctx, argv) {
+      const root = resolvePath(argv[1] ?? '.', ctx.cwd);
+      if (!isDir(root)) { ctx.stdout.print(`tree: ${argv[1] ?? '.'}: not a directory`); return; }
+      const out = [root === '' ? '/' : root];
+      const walk = (slug, prefix) => {
+        const kids = childrenOf(slug);
+        kids.forEach((k, i) => {
+          const isLast = i === kids.length - 1;
+          const connector = isLast ? '\u2514\u2500\u2500 ' : '\u251c\u2500\u2500 ';
+          out.push(prefix + connector + k.name + (k.dir ? '/' : ''));
+          if (k.dir) {
+            const child = slug === '' ? k.name : slug + '/' + k.name;
+            walk(child, prefix + (isLast ? '    ' : '\u2502   '));
+          }
+        });
+      };
+      walk(root, '');
+      ctx.stdout.write(out.join('\n') + '\n');
+    },
+  });
+
+  registry.register({
+    name: 'cd', description: 'change directory: cd <dir>', builtin: true,
+    async run(ctx, argv) {
+      const err = ctx.chdir(argv[1] ?? '/');
+      if (err) ctx.stdout.print(`cd: ${err}`);
+    },
+  });
+
+  registry.register({
+    name: 'pwd', description: 'print working directory', builtin: true,
+    async run(ctx) { ctx.stdout.print('/' + ctx.cwd); },
+  });
+
+  registry.register({
+    name: 'wc', description: 'count lines/words/bytes from stdin',
+    async run(ctx) {
+      const text = ctx.stdin;
+      const lines = text === '' ? 0 : text.split('\n').length;
+      const words = text.split(/\s+/).filter(Boolean).length;
+      const bytes = new TextEncoder().encode(text).length;
+      ctx.stdout.print(`  ${lines}  ${words}  ${bytes}`);
+    },
+  });
+
+  registry.register({
+    name: 'clear', description: 'clear the screen', builtin: true,
+    async run(ctx) { ctx.term.write('\x1b[2J\x1b[3J\x1b[H'); },
+  });
+
+  registry.register({
+    name: 'whoami', description: 'who you are', builtin: true,
+    async run(ctx) { ctx.stdout.print(SITE.user); },
+  });
+
+  registry.register({
+    name: 'exit', description: 'return to the home page', builtin: true,
+    async run(ctx) { ctx.chdir('/'); ctx.stdout.write(renderMarkdown(DOCS[SITE.home], ctx.term.cols)); },
+  });
+
+  // more / less — the pager (TUI). Shares one implementation.
+  async function page(ctx, text) {
+    if (!ctx.tty) { ctx.stdout.write(text); return; }
+    const s = ctx.term.takeOver();
+    const logical = text.split('\n');
+    let top = 0;
+    let drawnRows = 0;
+
+    const draw = () => {
+      s.clear();
+      const cols = Math.max(1, s.cols);
+      const pageH = Math.max(1, s.rows - 1);
+      const wrapped = [];
+      for (const ln of logical) wrapped.push(...wrapLine(ln, cols));
+      const total = wrapped.length;
+      const last = Math.max(0, total - pageH);
+      top = Math.min(top, last);
+      const vis = wrapped.slice(top, top + pageH);
+      drawnRows = vis.length;
+      s.write(vis.join('\r\n'));
+      const atEnd = top >= last && total > 0;
+      const pct = total === 0 ? 100 : Math.min(100, Math.round(((top + pageH) / total) * 100));
+      const status = atEnd ? `${DIM}(END)${RESET}` : `${DIM}--More-- ${pct}%${RESET}`;
+      s.write(move(0, s.rows - 1) + status);
+      return { atEnd, pageH, last };
+    };
+
+    const swallow = (e) => {
+      if (e.ctrlKey && (e.key === 'd' || e.key === 'u' || e.key === '\x04' || e.key === '\x15')) e.preventDefault();
+    };
+    window.addEventListener('keydown', swallow, true);
+
+    const STEP = 10;
+    let state = draw();
+    try {
+      await new Promise((resolve) => {
+        s.onKey((e) => {
+          const dom = e.domEvent;
+          if (dom.ctrlKey) {
+            const c = dom.key;
+            if (c === 'd' || c === 'D' || c === '\x04') top = Math.min(top + STEP, state.last);
+            else if (c === 'u' || c === 'U' || c === '\x15') top = Math.max(top - STEP, 0);
+            else return;
+            state = draw();
+            return;
+          }
+          const k = dom.key;
+          if (k === 'q' || k === 'Escape') { resolve(); return; }
+          if (k === ' ' || k === 'PageDown' || k === 'f') {
+            if (state.atEnd) { resolve(); return; }
+            top = Math.min(top + state.pageH, state.last);
+          } else if (k === 'b' || k === 'PageUp') top = Math.max(top - state.pageH, 0);
+          else if (k === 'ArrowDown' || k === 'j' || k === 'Enter') top = Math.min(top + 1, state.last);
+          else if (k === 'ArrowUp' || k === 'k') top = Math.max(top - 1, 0);
+          else if (k === 'g') top = 0;
+          else if (k === 'G') top = state.last;
+          else return;
+          state = draw();
+        });
+      });
+    } finally {
+      window.removeEventListener('keydown', swallow, true);
+    }
+
+    s.write(move(0, drawnRows) + ERASE_BELOW);
+    s.release();
   }
 
-  // ==================== Boot Sequence ====================
-  function boot() {
-    const logo = [
-      '',
-      '\x1b[1m     __  ________  _____ \x1b[0m',
-      '\x1b[1m    / / / /_  __/ / /   |\x1b[0m',
-      '\x1b[1m   / /_/ / / / / / / /| |\x1b[0m',
-      '\x1b[1m  / __  / / / / / /___/ \x1b[0m',
-      '\x1b[1m /_/ /_/ /_/ /_/_____/  \x1b[0m',
-      '',
-      '\x1b[3m  Think Different.\x1b[0m',
-      '',
-      'Welcome to Macintosh Terminal v1.0',
-      'Type \x1b[1mhelp\x1b[0m for available commands.',
-      'Try: \x1b[1mbio\x1b[0m, \x1b[1mtree ~/Documents\x1b[0m, \x1b[1mcat bio.md | grep JavaScript\x1b[0m',
-      ''
-    ];
+  registry.register({
+    name: 'more', description: 'page a document or stdin: more [path]',
+    async run(ctx, argv) {
+      const file = argv[1];
+      let text = null;
+      if (file) {
+        const doc = DOCS[resolvePath(file, ctx.cwd)];
+        if (!doc) { ctx.stdout.print(`more: ${file}: no such file`); return; }
+        text = renderMarkdown(doc, ctx.term.cols);
+      } else if (ctx.stdin) text = ctx.stdin;
+      if (text === null) { ctx.stdout.print('usage: more [path]'); return; }
+      await page(ctx, text);
+    },
+  });
 
-    logo.forEach(line => term.write(line + '\r\n'));
-    showPrompt();
+  registry.register({
+    name: 'less', description: 'page a document or stdin: less [path]',
+    async run(ctx, argv) {
+      const file = argv[1];
+      let text = null;
+      if (file) {
+        const doc = DOCS[resolvePath(file, ctx.cwd)];
+        if (!doc) { ctx.stdout.print(`less: ${file}: no such file`); return; }
+        text = renderMarkdown(doc, ctx.term.cols);
+      } else if (ctx.stdin) text = ctx.stdin;
+      if (text === null) { ctx.stdout.print('usage: less [path]'); return; }
+      await page(ctx, text);
+    },
+  });
+
+  // ---- document commands (one per content file) ----
+  for (const slug of docSlugs) {
+    registry.register({
+      name: slug,
+      description: `page · ${slug}`,
+      doc: true,
+      async run(ctx) {
+        if (ctx.tty) ctx.term.write('\x1b[2J\x1b[3J\x1b[H');
+        ctx.stdout.write(renderMarkdown(DOCS[slug], ctx.term.cols));
+      },
+    });
   }
 
-  // ==================== Focus Handling ====================
-  document.getElementById('term-host').addEventListener('click', () => term.focus());
-  term.focus();
+  // ========================================================================
+  // Routing (hash-based, so the browser Back button works)
+  // ========================================================================
+  const commandFromHash = () => location.hash.replace(/^#/, '').trim();
+  const initial = commandFromHash() || SITE.home;
 
-  // ==================== Start ====================
-  boot();
+  onNavigate = (cmd) => {
+    try { history.pushState({ cmd }, '', '#' + cmd); } catch (e) { /* file:// */ }
+    inject(cmd);
+  };
+
+  window.addEventListener('popstate', (e) => {
+    const cmd = (e.state && e.state.cmd) || commandFromHash() || SITE.home;
+    inject(cmd);
+  });
+
+  try { history.replaceState({ cmd: initial }, '', '#' + initial); } catch (e) { /* file:// */ }
+
+  // ========================================================================
+  // Hello boot screen (iPhone-style), then reveal the terminal.
+  // ========================================================================
+  function playHello(onDone) {
+    const screen = document.getElementById('hello-screen');
+    const wordEl = screen.querySelector('.hello-word');
+    const langEl = document.getElementById('hello-lang');
+    const seq = SITE.hellos;
+    if (!seq || seq.length === 0) { onDone(); return; }
+
+    langEl.textContent = 'Think different.';
+    wordEl.textContent = seq[0];
+    let i = 1;
+
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearInterval(timer);
+      screen.classList.add('fade-out');
+      setTimeout(onDone, 650);
+    };
+
+    const timer = setInterval(() => {
+      if (i >= seq.length) { finish(); return; }
+      wordEl.textContent = seq[i];
+      i++;
+    }, 650);
+
+    screen.addEventListener('click', finish);
+    // Auto-advance safety net: never strand the user on the splash.
+    setTimeout(finish, 650 * seq.length + 400);
+  }
+
+  // Reveal the terminal once fitted (hide the pre-JS / font-swap reflow).
+  const reveal = () => {
+    try { term.fit(); } finally {
+      termHost.closest('#mac-window').style.visibility = 'visible';
+      term.focus();
+    }
+  };
+
+  // Start everything after the Hello splash.
+  playHello(() => {
+    reveal();
+    start();
+  });
+
+  // Safety net in case fonts/CDN stall — never leave a blank page.
+  setTimeout(() => {
+    const s = document.getElementById('hello-screen');
+    if (s) s.classList.add('fade-out');
+  }, 8000);
 
 })();

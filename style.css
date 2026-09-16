@@ -1,0 +1,237 @@
+/* ==========================================================================
+   style.css — Macintosh-style terminal homepage
+   "Think Different."
+   ========================================================================== */
+
+:root {
+  /* Macintosh monochrome palette */
+  --mac-bg: #ffffff;
+  --mac-fg: #111111;
+  --mac-gray: #888888;
+  --mac-light-gray: #dcdcdc;
+  --mac-border: #111111;
+  --mac-titlebar: #e8e8e8;
+  --mac-desktop: #b9b9b9;
+  --mac-accent: #6e6e6e;
+
+  /* Hello screen */
+  --hello-bg: #ffffff;
+  --hello-fg: #1d1d1f;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--mac-desktop);
+  font-family: 'Monaco', 'SF Mono', 'Menlo', Consolas, 'Courier New', monospace;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+/* ==========================================================================
+   Hello boot screen (iPhone-style)
+   ========================================================================== */
+#hello-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--hello-bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: opacity 0.8s ease;
+}
+
+#hello-screen.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hello-word {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+    'SF Pro Text', 'Inter', 'Helvetica Neue', 'Segoe UI', sans-serif;
+  font-weight: 200; /* SF-like ultra light */
+  font-size: clamp(48px, 12vw, 120px);
+  letter-spacing: -0.02em;
+  color: var(--hello-fg);
+  animation: hello-in 1.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes hello-in {
+  from { opacity: 0; transform: translateY(18px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.hello-lang {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+    'SF Pro Text', 'Inter', 'Helvetica Neue', 'Segoe UI', sans-serif;
+  font-weight: 300;
+  font-size: clamp(16px, 3vw, 26px);
+  letter-spacing: 0.04em;
+  color: #6e6e73;
+  min-height: 1.4em;
+  animation: hello-in 1.4s cubic-bezier(0.22, 1, 0.36, 1) 0.2s both;
+}
+
+.hello-hint {
+  position: absolute;
+  bottom: 40px;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter',
+    'Helvetica Neue', 'Segoe UI', sans-serif;
+  font-weight: 300;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: #a1a1a6;
+}
+
+/* ==========================================================================
+   Terminal window (Macintosh-style)
+   ========================================================================== */
+#app {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+
+#mac-window {
+  width: 100%;
+  max-width: 860px;
+  height: 86vh;
+  background: var(--mac-bg);
+  border: 2px solid var(--mac-border);
+  box-shadow: 8px 8px 0 rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Hidden until the terminal is fitted and the Hello splash completes,
+     so the pre-JS / font-swap reflow is never visible. */
+  visibility: hidden;
+}
+
+/* Title bar */
+#titlebar {
+  height: 26px;
+  min-height: 26px;
+  background: repeating-linear-gradient(
+    to bottom,
+    #f0f0f0 0px, #f0f0f0 2px,
+    #ffffff 2px, #ffffff 4px
+  );
+  border-bottom: 2px solid var(--mac-border);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  gap: 10px;
+  user-select: none;
+}
+
+.window-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.window-controls span {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--mac-border);
+  background: #fff;
+}
+
+.window-controls .close { background: #fff; }
+.window-controls .close::after { content: '×'; font-size: 9px; line-height: 10px; display: block; text-align: center; }
+.window-controls .minimize { background: #fff; }
+.window-controls .maximize { background: #fff; }
+
+.window-title {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0.04em;
+  color: var(--mac-fg);
+}
+
+/* Terminal host */
+#term-host {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px 22px 16px;
+  overflow: hidden;
+  position: relative;
+}
+
+#term-screen {
+  height: 100%;
+}
+
+#term-screen .xterm { height: 100%; }
+
+/* CRT scanlines (subtle, Macintosh-era texture) */
+#term-host::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0.028) 0 1px,
+    transparent 1px 3px
+  );
+}
+
+/* Vignette */
+#term-host::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 11;
+  background: radial-gradient(
+    ellipse 120% 120% at 50% 50%,
+    transparent 60%,
+    rgba(0, 0, 0, 0.10) 100%
+  );
+}
+
+/* Selection */
+::selection {
+  background: var(--mac-fg);
+  color: var(--mac-bg);
+}
+
+/* Scrollbar */
+.xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: #9a9a9a transparent;
+}
+
+.xterm-viewport::-webkit-scrollbar { width: 12px; }
+.xterm-viewport::-webkit-scrollbar-track {
+  background: var(--mac-bg);
+  border-left: 1px solid var(--mac-border);
+}
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--mac-light-gray);
+  border: 1px solid var(--mac-border);
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+@media (max-width: 640px) {
+  #app { padding: 6px; }
+  #mac-window {
+    height: 94vh;
+    box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.55);
+  }
+  #term-host { padding: 10px 8px 18px 8px; }
+  #titlebar { height: 22px; min-height: 22px; }
+}
